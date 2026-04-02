@@ -1,0 +1,28 @@
+# virtual environment
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# environment / secrets
+.env
+.env.*
+
+# downloads & local output
+downloads/
+
+# debug / scratch
+debug_page.html
+*_debug.png
+error_screenshot.png
+
+# IDE
+.idea/
+.vscode/

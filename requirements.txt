@@ -1,0 +1,6 @@
+curl_cffi
+pydantic
+beautifulsoup4
+lxml
+playwright
+python-docx
