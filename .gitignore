@@ -19,6 +19,7 @@ __pycache__/
 # downloads & local output
 downloads/
 Tenders_Analytics_DB.xlsx
+tenders_manifest.json
 
 # debug / scratch
 debug_page.html

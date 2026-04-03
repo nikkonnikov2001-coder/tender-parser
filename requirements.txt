@@ -11,6 +11,11 @@ curl_cffi
 
 # ── Чтение документов ──
 python-docx
+pypdf
+pymupdf
+pytesseract
+Pillow
+striprtf
 
 # ── AI-анализ + Excel ──
 requests
@@ -19,3 +24,6 @@ openpyxl
 
 # ── Окружение ──
 python-dotenv
+
+# ── Тестирование ──
+pytest

@@ -1,17 +1,40 @@
 import os
+from typing import Optional
+from urllib.parse import quote
 
 import load_env  # noqa: F401
 import requests
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-PROXY_URL = os.environ.get("TELEGRAM_HTTP_PROXY_URL", "").strip()
+
+
+def _build_proxy_url() -> Optional[str]:
+    """
+    Прокси для requests: либо TELEGRAM_PROXY_* (предпочтительно — пароль с любыми символами),
+    либо TELEGRAM_HTTP_PROXY_URL как есть.
+    """
+    host = os.environ.get("TELEGRAM_PROXY_HOST", "").strip()
+    port = os.environ.get("TELEGRAM_PROXY_PORT", "").strip()
+    user = os.environ.get("TELEGRAM_PROXY_USER", "").strip()
+    password = os.environ.get("TELEGRAM_PROXY_PASSWORD", "").strip()
+    raw_url = os.environ.get("TELEGRAM_HTTP_PROXY_URL", "").strip()
+
+    if host and port:
+        if user or password:
+            u = quote(user, safe="")
+            p = quote(password, safe="")
+            return f"http://{u}:{p}@{host}:{port}"
+        return f"http://{host}:{port}"
+
+    return raw_url or None
 
 
 def _telegram_proxies():
-    if not PROXY_URL:
+    url = _build_proxy_url()
+    if not url:
         return None
-    return {"http": PROXY_URL, "https": PROXY_URL}
+    return {"http": url, "https": url}
 
 
 def send_telegram_report(file_path):
@@ -52,8 +75,18 @@ def send_telegram_report(file_path):
                 print(f"❌ Ошибка Телеграма: {response.text}")
 
         except Exception as e:
+            err = str(e)
             print(f"❌ Сбой сети при отправке.\nОшибка: {e}")
+            if "407" in err or "Proxy Authentication" in err:
+                print(
+                    "\n💡 407 = прокси не принял логин/пароль. "
+                    "Заполни в .env TELEGRAM_PROXY_HOST, TELEGRAM_PROXY_PORT, "
+                    "TELEGRAM_PROXY_USER, TELEGRAM_PROXY_PASSWORD (без ручного URL) "
+                    "или проверь данные у провайдера."
+                )
 
 
 if __name__ == "__main__":
-    send_telegram_report("Tenders_Analytics_DB.xlsx")
+    from analyzer import EXCEL_FILENAME
+
+    send_telegram_report(EXCEL_FILENAME)

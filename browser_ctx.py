@@ -1,5 +1,14 @@
 """Общие настройки Playwright для parser и downloader."""
 
+import os
+
+
+def playwright_headless() -> bool:
+    """PLAYWRIGHT_HEADLESS=0|false|no|off — окно браузера (отладка). По умолчанию headless."""
+    raw = os.environ.get("PLAYWRIGHT_HEADLESS", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 PLAYWRIGHT_CONTEXT_KWARGS = {
     "viewport": {"width": 1920, "height": 1080},
     "user_agent": (
