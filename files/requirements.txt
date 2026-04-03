@@ -1,0 +1,21 @@
+# ── Telegram бот ──
+aiogram>=3.7.0
+apscheduler>=3.10.0
+
+# ── Парсинг ──
+playwright
+beautifulsoup4
+lxml
+pydantic
+curl_cffi
+
+# ── Чтение документов ──
+python-docx
+
+# ── AI-анализ + Excel ──
+requests
+pandas
+openpyxl
+
+# ── Окружение ──
+python-dotenv
