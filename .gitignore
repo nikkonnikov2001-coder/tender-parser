@@ -14,9 +14,11 @@ __pycache__/
 # environment / secrets
 .env
 .env.*
+!.env.example
 
 # downloads & local output
 downloads/
+Tenders_Analytics_DB.xlsx
 
 # debug / scratch
 debug_page.html

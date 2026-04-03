@@ -1,6 +1,8 @@
 import os
 from docx import Document
 
+from tz_docs import is_tz_docx
+
 def extract_text_from_docx(file_path):
     doc = Document(file_path)
     text_content = []
@@ -39,9 +41,7 @@ def get_tz_text(base_dir="downloads"):
         tz_found = False
         
         for file in os.listdir(tender_path):
-            lower_name = file.lower()
-            # Ищем любые упоминания ТЗ, контракта или объекта закупки
-            if ("тз" in lower_name or "техническое_задание" in lower_name or "описание_объекта" in lower_name or "контракт" in lower_name) and file.endswith(".docx"):
+            if is_tz_docx(file):
                 file_path = os.path.join(tender_path, file)
                 print(f"   📄 Читаем файл: {file}")
                 

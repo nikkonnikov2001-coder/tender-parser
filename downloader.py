@@ -3,6 +3,8 @@ import os
 from playwright.async_api import async_playwright
 from curl_cffi import requests as curl_requests
 
+from browser_ctx import PLAYWRIGHT_CONTEXT_KWARGS
+
 async def get_tender_docs(url: str, tender_id: str):
     doc_url = url.replace("common-info.html", "documents.html")
     print(f"🚀 Летим в раздел документов: {doc_url}")
@@ -14,11 +16,7 @@ async def get_tender_docs(url: str, tender_id: str):
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            ignore_https_errors=True
-        )
+        context = await browser.new_context(**PLAYWRIGHT_CONTEXT_KWARGS)
         page = await context.new_page()
 
         try:
