@@ -1,37 +1,17 @@
+import logging
 import os
-from typing import Optional
-from urllib.parse import quote
 
-import load_env  # noqa: F401
+from load_env import build_telegram_proxy_url  # noqa: F401 (side-effect: loads .env)
 import requests
+
+log = logging.getLogger("tender_bot.notifier")
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 
-def _build_proxy_url() -> Optional[str]:
-    """
-    Прокси для requests: либо TELEGRAM_PROXY_* (предпочтительно — пароль с любыми символами),
-    либо TELEGRAM_HTTP_PROXY_URL как есть.
-    """
-    host = os.environ.get("TELEGRAM_PROXY_HOST", "").strip()
-    port = os.environ.get("TELEGRAM_PROXY_PORT", "").strip()
-    user = os.environ.get("TELEGRAM_PROXY_USER", "").strip()
-    password = os.environ.get("TELEGRAM_PROXY_PASSWORD", "").strip()
-    raw_url = os.environ.get("TELEGRAM_HTTP_PROXY_URL", "").strip()
-
-    if host and port:
-        if user or password:
-            u = quote(user, safe="")
-            p = quote(password, safe="")
-            return f"http://{u}:{p}@{host}:{port}"
-        return f"http://{host}:{port}"
-
-    return raw_url or None
-
-
 def _telegram_proxies():
-    url = _build_proxy_url()
+    url = build_telegram_proxy_url()
     if not url:
         return None
     return {"http": url, "https": url}
@@ -39,18 +19,15 @@ def _telegram_proxies():
 
 def send_telegram_report(file_path):
     if not BOT_TOKEN or not CHAT_ID:
-        print("❌ Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID в .env — пропускаем отправку.")
+        log.warning("Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID — пропускаем отправку.")
         return
 
     if not os.path.exists(file_path):
-        print(f"❌ Ошибка: Файл {file_path} не найден!")
+        log.error("Файл %s не найден!", file_path)
         return
 
     proxies = _telegram_proxies()
-    if proxies:
-        print("\n🚀 Отправляем отчёт в Telegram через прокси...")
-    else:
-        print("\n🚀 Отправляем отчёт в Telegram (без прокси)...")
+    log.info("Отправляем отчёт в Telegram%s...", " через прокси" if proxies else "")
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
 
@@ -58,10 +35,7 @@ def send_telegram_report(file_path):
         files = {"document": f}
         data = {
             "chat_id": CHAT_ID,
-            "caption": (
-                "🔥 Брух, свежая аналитика по тендерам готова! "
-                "Твоя RTX 3070 отлично потрудилась."
-            ),
+            "caption": "Свежая аналитика по тендерам готова!",
         }
 
         try:
@@ -70,19 +44,17 @@ def send_telegram_report(file_path):
             )
 
             if response.status_code == 200:
-                print("✅ Отчет успешно доставлен в Телегу!")
+                log.info("Отчет успешно доставлен в Telegram.")
             else:
-                print(f"❌ Ошибка Телеграма: {response.text}")
+                log.error("Ошибка Telegram API: %s", response.text)
 
         except Exception as e:
             err = str(e)
-            print(f"❌ Сбой сети при отправке.\nОшибка: {e}")
+            log.error("Сбой сети при отправке: %s", e)
             if "407" in err or "Proxy Authentication" in err:
-                print(
-                    "\n💡 407 = прокси не принял логин/пароль. "
-                    "Заполни в .env TELEGRAM_PROXY_HOST, TELEGRAM_PROXY_PORT, "
-                    "TELEGRAM_PROXY_USER, TELEGRAM_PROXY_PASSWORD (без ручного URL) "
-                    "или проверь данные у провайдера."
+                log.error(
+                    "407 = прокси не принял логин/пароль. "
+                    "Проверьте TELEGRAM_PROXY_* в .env."
                 )
 
 

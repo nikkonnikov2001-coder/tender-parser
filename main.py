@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 
@@ -8,6 +9,12 @@ from downloader import get_tender_docs, shared_download_browser
 from notifier import send_telegram_report
 from parser import parse_tenders_heavy
 from tenders_manifest import DEFAULT_MANIFEST_PATH, write_tenders_manifest
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("tender_bot.main")
 
 def _download_delay_sec() -> float:
     raw = os.environ.get("DOWNLOAD_DELAY_SEC", "5").strip()
@@ -59,11 +66,11 @@ def _download_dir_has_files(tender_id: str) -> bool:
 
 
 async def _search_and_prepare_tenders():
-    print("\n[ЭТАП 1/4] Поиск свежих тендеров...")
+    log.info("[ЭТАП 1/4] Поиск свежих тендеров...")
     tenders = await parse_tenders_heavy()
     cap = _max_tenders_cap()
     if cap is not None and len(tenders) > cap:
-        print(f"✂️ PIPELINE_MAX_TENDERS={cap}: обрабатываем только первые {cap} из {len(tenders)}.")
+        log.info("PIPELINE_MAX_TENDERS=%d: обрабатываем первые %d из %d.", cap, cap, len(tenders))
         tenders = tenders[:cap]
 
     if not tenders:
@@ -76,22 +83,22 @@ async def _search_and_prepare_tenders():
 async def _download_tenders_batch(tenders, *, stage_label: str = "[ЭТАП 2/4]") -> None:
     skip_existing = _skip_existing_downloads()
     if skip_existing:
-        print("\n💾 SKIP_EXISTING_DOWNLOADS: пропускаем папки, где уже есть файлы.")
+        log.info("SKIP_EXISTING_DOWNLOADS: пропускаем папки, где уже есть файлы.")
 
     needs_browser = any(
         not (skip_existing and _download_dir_has_files(t.tender_id)) for t in tenders
     )
 
-    print(f"\n{stage_label} Скачивание документов для {len(tenders)} тендеров...")
+    log.info("%s Скачивание документов для %d тендеров...", stage_label, len(tenders))
     if needs_browser:
-        print("🌐 Один сеанс Playwright (Chromium) на всё скачивание.\n")
+        log.info("Один сеанс Playwright (Chromium) на всё скачивание.")
 
     if needs_browser:
         async with shared_download_browser() as page:
             for index, tender in enumerate(tenders, start=1):
-                print(f"\n⏳ Обработка {index} из {len(tenders)} (ID: {tender.tender_id})")
+                log.info("Обработка %d/%d (ID: %s)", index, len(tenders), tender.tender_id)
                 if skip_existing and _download_dir_has_files(tender.tender_id):
-                    print("   ⏭️ Уже есть скачанные файлы — шаг пропущен.")
+                    log.info("Уже есть скачанные файлы — пропуск.")
                     continue
                 await get_tender_docs(page, str(tender.url), tender.tender_id)
                 delay = _download_delay_sec()
@@ -99,35 +106,32 @@ async def _download_tenders_batch(tenders, *, stage_label: str = "[ЭТАП 2/4]
                     await asyncio.sleep(delay)
     else:
         for index, tender in enumerate(tenders, start=1):
-            print(f"\n⏳ Обработка {index} из {len(tenders)} (ID: {tender.tender_id})")
+            log.info("Обработка %d/%d (ID: %s)", index, len(tenders), tender.tender_id)
             if skip_existing and _download_dir_has_files(tender.tender_id):
-                print("   ⏭️ Уже есть скачанные файлы — шаг пропущен.")
+                log.info("Уже есть скачанные файлы — пропуск.")
 
 
 async def run_pipeline():
-    print("=== 🔥 ЗАПУСК ПОЛНОГО AI-КОНВЕЙЕРА ТЕНДЕРОВ 🔥 ===")
+    log.info("=== ЗАПУСК ПОЛНОГО AI-КОНВЕЙЕРА ТЕНДЕРОВ ===")
 
     tenders = await _search_and_prepare_tenders()
     if not tenders:
-        print("Тендеры не найдены или произошла ошибка. Завершаем работу.")
+        log.warning("Тендеры не найдены или произошла ошибка. Завершаем работу.")
         return
 
     await _download_tenders_batch(tenders)
 
-    # ЭТАП 3: АНАЛИТИКА И EXCEL (Работает analyzer.py)
-    print("\n[ЭТАП 3/4] Чтение ТЗ и анализ нейросетью...")
-    # Нейросеть прочтет скачанное и сама создаст Tenders_Analytics_DB.xlsx
+    log.info("[ЭТАП 3/4] Чтение ТЗ и анализ нейросетью...")
     run_analytics(manifest_path=DEFAULT_MANIFEST_PATH)
 
-    # ЭТАП 4: ОТПРАВКА В TELEGRAM (Работает notifier.py)
-    print("\n[ЭТАП 4/4] Отправка результатов ботом...")
+    log.info("[ЭТАП 4/4] Отправка результатов ботом...")
 
     if os.path.exists(EXCEL_FILENAME):
         send_telegram_report(EXCEL_FILENAME)
     else:
-        print("❌ Excel файл не найден, отправлять нечего.")
+        log.error("Excel файл не найден, отправлять нечего.")
 
-    print("\n=== 🏁 КОНВЕЙЕР УСПЕШНО ОТРАБОТАЛ! 🏁 ===")
+    log.info("=== КОНВЕЙЕР УСПЕШНО ОТРАБОТАЛ! ===")
 
 def _is_analyze_only(argv: list[str]) -> bool:
     for a in argv[1:]:
@@ -151,28 +155,28 @@ def _is_help(argv: list[str]) -> bool:
 
 def run_analyze_only():
     """Только анализ и Telegram: папка downloads/ и опционально tenders_manifest.json."""
-    print("=== 🔁 РЕЖИМ: только анализ (без поиска и скачивания) ===\n")
-    print("[ЭТАП 3/4] Анализ уже скачанных ТЗ…")
+    log.info("=== РЕЖИМ: только анализ (без поиска и скачивания) ===")
+    log.info("[ЭТАП 3/4] Анализ уже скачанных ТЗ...")
     run_analytics(manifest_path=DEFAULT_MANIFEST_PATH)
 
-    print("\n[ЭТАП 4/4] Отправка в Telegram…")
+    log.info("[ЭТАП 4/4] Отправка в Telegram...")
     if os.path.exists(EXCEL_FILENAME):
         send_telegram_report(EXCEL_FILENAME)
     else:
-        print("❌ Excel не создан — нечего отправлять.")
+        log.error("Excel не создан — нечего отправлять.")
 
-    print("\n=== 🏁 ГОТОВО 🏁 ===")
+    log.info("=== ГОТОВО ===")
 
 
 async def run_download_only():
     """Поиск и скачивание без Ollama и Telegram."""
-    print("=== 📥 РЕЖИМ: только поиск и скачивание (без анализа) ===")
+    log.info("=== РЕЖИМ: только поиск и скачивание (без анализа) ===")
     tenders = await _search_and_prepare_tenders()
     if not tenders:
-        print("Тендеры не найдены или произошла ошибка. Завершаем работу.")
+        log.warning("Тендеры не найдены или произошла ошибка. Завершаем работу.")
         return
     await _download_tenders_batch(tenders, stage_label="[СКАЧИВАНИЕ]")
-    print("\n=== 🏁 Скачивание завершено (анализ: python main.py analyze-only) ===")
+    log.info("=== Скачивание завершено (анализ: python main.py analyze-only) ===")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 
 import asyncio
 import os
+import shutil
 import time
 import logging
 from typing import Dict, Any, Optional
@@ -17,6 +18,50 @@ from bot_config import Config
 
 log = logging.getLogger("tender_bot.search")
 
+DOWNLOADS_ROOT = "downloads"
+REPORTS_ROOT = "reports"
+
+_CLEANUP_MAX_AGE_DAYS = int(os.environ.get("CLEANUP_MAX_AGE_DAYS", "14"))
+
+
+def cleanup_old_files(max_age_days: int | None = None):
+    """Удаляет папки тендеров и файлы отчётов/кэша старше max_age_days."""
+    max_age = max_age_days if max_age_days is not None else _CLEANUP_MAX_AGE_DAYS
+    if max_age <= 0:
+        return
+    cutoff = time.time() - max_age * 86400
+    removed = 0
+
+    for root_dir in (DOWNLOADS_ROOT, REPORTS_ROOT, "cache"):
+        if not os.path.isdir(root_dir):
+            continue
+        for entry in os.scandir(root_dir):
+            try:
+                mtime = entry.stat().st_mtime
+                if mtime >= cutoff:
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry.path, ignore_errors=True)
+                else:
+                    os.remove(entry.path)
+                removed += 1
+            except Exception:
+                pass
+
+    if removed:
+        log.info("Очистка: удалено %d старых элементов (>%d дней)", removed, max_age)
+
+
+def _user_dl_dir(chat_id: int) -> str:
+    d = os.path.join(DOWNLOADS_ROOT, str(chat_id))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _user_excel_path(chat_id: int) -> str:
+    os.makedirs(REPORTS_ROOT, exist_ok=True)
+    return os.path.join(REPORTS_ROOT, f"{chat_id}.xlsx")
+
 
 async def run_search_pipeline(
     cfg: Config,
@@ -25,7 +70,10 @@ async def run_search_pipeline(
     status_msg: Message,
 ) -> Optional[Dict[str, Any]]:
     """
-    1. Поиск тендеров  2. Скачивание ТЗ  3. AI-анализ  4. Excel
+    1. Поиск тендеров (мульти-страницы)
+    2. Скачивание ТЗ (shared browser)
+    3. AI-анализ
+    4. Excel
     """
     start_time = time.time()
 
@@ -37,7 +85,7 @@ async def run_search_pipeline(
         "▪️ Этап 4/4 — Формирование отчёта"
     )
 
-    tenders = await _parse_tenders(cfg)
+    tenders = await _parse_tenders(cfg, status_msg, chat_id)
     if not tenders:
         return None
 
@@ -49,22 +97,7 @@ async def run_search_pipeline(
         "▪️ Этап 4/4 — Формирование отчёта"
     )
 
-    for i, tender in enumerate(tenders, 1):
-        try:
-            await _download_tender_docs(str(tender["url"]), tender["id"])
-        except Exception as e:
-            log.warning("Ошибка скачивания %s: %s", tender["id"], e)
-
-        if i % 2 == 0 or i == len(tenders):
-            await _update_status(status_msg,
-                f"✅ Этап 1/4 — Найдено <b>{len(tenders)}</b> тендеров\n"
-                f"▫️ Этап 2/4 — <b>Скачивание</b> ({i}/{len(tenders)})...\n"
-                "▪️ Этап 3/4 — AI-анализ ТЗ\n"
-                "▪️ Этап 4/4 — Формирование отчёта"
-            )
-
-        if i < len(tenders):
-            await asyncio.sleep(3)
+    await _download_all_docs(tenders, status_msg, chat_id)
 
     # ── ЭТАП 3 ────────────────────────────────────────────────
     await _update_status(status_msg,
@@ -78,7 +111,7 @@ async def run_search_pipeline(
     results_data = []
 
     for idx, tender in enumerate(tenders, 1):
-        analysis = await _analyze_tender(tender["id"], cfg)
+        analysis = await _analyze_tender(tender["id"], cfg, chat_id)
         if analysis:
             tender["analysis"] = analysis
             analyzed_count += 1
@@ -106,7 +139,7 @@ async def run_search_pipeline(
         f"▫️ Этап 4/4 — <b>Формирование отчёта</b>..."
     )
 
-    excel_path = _build_excel(results_data) if results_data else None
+    excel_path = _build_excel(results_data, chat_id) if results_data else None
 
     elapsed = time.time() - start_time
     elapsed_str = f"{int(elapsed // 60)} мин {int(elapsed % 60)} сек"
@@ -131,147 +164,149 @@ async def run_search_pipeline(
 #  Обёртки над существующими модулями
 # ══════════════════════════════════════════════════════════════
 
-async def _parse_tenders(cfg: Config) -> list:
+async def _parse_tenders(cfg: Config, status_msg: Message, chat_id: int) -> list:
+    """Мульти-страничный поиск с дедупликацией."""
     from playwright.async_api import async_playwright
-    from bs4 import BeautifulSoup
-    from browser_ctx import PLAYWRIGHT_CONTEXT_KWARGS
+    from browser_ctx import PLAYWRIGHT_CONTEXT_KWARGS, playwright_headless
+    from parser import fetch_and_parse_page
 
-    url = cfg.build_search_url()
-    log.info("Парсинг: %s", url)
+    max_pages = max(1, min(cfg.max_pages, 10))
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=playwright_headless())
         context = await browser.new_context(**PLAYWRIGHT_CONTEXT_KWARGS)
         page = await context.new_page()
 
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(2000)
-            await page.keyboard.press("Escape")
-            await page.wait_for_selector(
-                "div.search-registry-entry-block", timeout=30000
-            )
+            all_tenders: list[dict] = []
+            seen_ids: set[str] = set()
 
-            html = await page.content()
-            soup = BeautifulSoup(html, "lxml")
-            blocks = soup.find_all("div", class_="search-registry-entry-block")
+            for pnum in range(1, max_pages + 1):
+                url = cfg.build_search_url(page=pnum)
+                log.info("Парсинг стр. %d/%d: %s", pnum, max_pages, url)
 
-            tenders = []
-            for block in blocks:
-                id_tag = block.find("div", class_="registry-entry__header-mid__number")
-                tender_id = id_tag.text.strip().replace("№ ", "") if id_tag else None
-                if not tender_id:
-                    continue
+                if max_pages > 1:
+                    await _update_status(status_msg,
+                        f"▫️ Этап 1/4 — <b>Поиск</b> (стр. {pnum}/{max_pages}, "
+                        f"найдено {len(all_tenders)})...\n"
+                        "▪️ Этап 2/4 — Скачивание документов\n"
+                        "▪️ Этап 3/4 — AI-анализ ТЗ\n"
+                        "▪️ Этап 4/4 — Формирование отчёта"
+                    )
 
-                link_tag = id_tag.find("a") if id_tag else None
-                href = (
-                    "https://zakupki.gov.ru" + link_tag["href"]
-                    if link_tag and "href" in link_tag.attrs else ""
-                )
+                try:
+                    items = await fetch_and_parse_page(page, url)
+                except Exception:
+                    if pnum == 1:
+                        raise
+                    log.info("Стр. %d — нет карточек, конец выдачи", pnum)
+                    break
 
-                price_tag = block.find("div", class_="price-block__value")
-                price = price_tag.text.strip().replace("\xa0", " ") if price_tag else "—"
+                if not items:
+                    break
 
-                name_tag = block.find("div", class_="registry-entry__body-value")
-                name = name_tag.text.strip() if name_tag else "—"
+                for t in items:
+                    if t.tender_id in seen_ids:
+                        continue
+                    seen_ids.add(t.tender_id)
+                    all_tenders.append({
+                        "id": t.tender_id,
+                        "price": t.price,
+                        "name": t.name,
+                        "url": str(t.url),
+                        "pub_date": t.pub_date,
+                        "org_name": t.org_name,
+                    })
 
-                # Дата публикации
-                date_tag = block.find("div", class_="data-block__value")
-                pub_date = date_tag.text.strip() if date_tag else "—"
+                if pnum < max_pages:
+                    await asyncio.sleep(1.5)
 
-                # Заказчик
-                org_tag = block.find("div", class_="registry-entry__body-href")
-                org_name = org_tag.text.strip() if org_tag else "—"
-
-                tenders.append({
-                    "id": tender_id,
-                    "price": price,
-                    "name": name,
-                    "url": href,
-                    "pub_date": pub_date,
-                    "org_name": org_name,
-                })
-
-            log.info("Найдено тендеров: %d", len(tenders))
-            return tenders
+            log.info("Найдено тендеров: %d", len(all_tenders))
+            return all_tenders
 
         except Exception:
             log.exception("Ошибка парсинга")
-            await page.screenshot(path="error_screenshot.png")
+            try:
+                await page.screenshot(
+                    path=os.path.join(_user_dl_dir(chat_id), "error_screenshot.png")
+                )
+            except Exception:
+                pass
+            if all_tenders:
+                log.info(
+                    "Возвращаем %d частично собранных тендеров",
+                    len(all_tenders),
+                )
+                return all_tenders
             raise
         finally:
             await browser.close()
 
 
-async def _download_tender_docs(tender_url: str, tender_id: str):
-    try:
-        from downloader import get_tender_docs
-        await get_tender_docs(tender_url, tender_id)
-    except ImportError:
-        log.warning("downloader.py не найден — пропускаем скачивание")
-    except Exception as e:
-        log.warning("Ошибка скачивания %s: %s", tender_id, e)
+async def _download_all_docs(
+    tenders: list, status_msg: Message, chat_id: int,
+) -> None:
+    """Скачивание документов через один общий браузер."""
+    from downloader import get_tender_docs, shared_download_browser
+
+    total = len(tenders)
+    dl_dir = _user_dl_dir(chat_id)
+
+    async with shared_download_browser() as page:
+        for i, tender in enumerate(tenders, 1):
+            try:
+                await get_tender_docs(
+                    page, str(tender["url"]), tender["id"],
+                    base_dir=dl_dir,
+                )
+            except Exception as e:
+                log.warning("Ошибка скачивания %s: %s", tender["id"], e)
+
+            if i % 2 == 0 or i == total:
+                await _update_status(status_msg,
+                    f"✅ Этап 1/4 — Найдено <b>{total}</b> тендеров\n"
+                    f"▫️ Этап 2/4 — <b>Скачивание</b> ({i}/{total})...\n"
+                    "▪️ Этап 3/4 — AI-анализ ТЗ\n"
+                    "▪️ Этап 4/4 — Формирование отчёта"
+                )
+
+            if i < total:
+                await asyncio.sleep(3)
 
 
-async def _analyze_tender(tender_id: str, cfg: Config) -> Optional[str]:
-    tender_path = os.path.join("downloads", tender_id)
+async def _analyze_tender(
+    tender_id: str, cfg: Config, chat_id: int,
+) -> Optional[str]:
+    tender_path = os.path.join(_user_dl_dir(chat_id), tender_id)
     if not os.path.isdir(tender_path):
         return None
 
     try:
-        from reader import extract_text_from_docx
-        from tz_docs import is_tz_docx
+        from reader import extract_text_from_file
+        from tz_docs import is_tz_file
+        from llm import call_ollama
     except ImportError:
         return None
 
     for filename in os.listdir(tender_path):
-        if is_tz_docx(filename):
+        if is_tz_file(filename):
             file_path = os.path.join(tender_path, filename)
-            text = extract_text_from_docx(file_path)
+            text = extract_text_from_file(file_path)
             if len(text) > 500:
-                return await asyncio.to_thread(
-                    _call_ollama, text, tender_id, cfg.ollama_model
-                )
+                try:
+                    return await asyncio.to_thread(
+                        call_ollama, text, tender_id, cfg.ollama_model
+                    )
+                except Exception as e:
+                    log.warning("LLM-ошибка для %s: %s", tender_id, e)
+                    return None
     return None
 
 
-def _call_ollama(text: str, tender_id: str, model: str) -> str:
-    import requests
-
-    ollama_url = os.environ.get(
-        "OLLAMA_URL", "http://localhost:11434/api/generate"
-    ).strip()
-    timeout = int(os.environ.get("OLLAMA_TIMEOUT_SEC", "600"))
-    safe_text = text[:25000]
-
-    prompt = (
-        "Ты — профессиональный тендерный аналитик. "
-        "Прочитай выдержку из Технического задания и составь краткую выжимку.\n\n"
-        "Структура ответа:\n"
-        "1. Предмет контракта\n"
-        "2. Сроки\n"
-        "3. Требования и штрафы\n\n"
-        f"Текст ТЗ:\n{safe_text}"
-    )
-
-    try:
-        resp = requests.post(ollama_url, json={
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_ctx": 16384},
-        }, timeout=timeout)
-        if resp.status_code == 200:
-            return resp.json().get("response", "")
-        return f"Ошибка API: {resp.status_code}"
-    except Exception as e:
-        return f"Ошибка Ollama: {e}"
-
-
-def _build_excel(results_data: list) -> str:
+def _build_excel(results_data: list, chat_id: int) -> str:
     import pandas as pd
     df = pd.DataFrame(results_data)
-    path = "Tenders_Analytics_DB.xlsx"
+    path = _user_excel_path(chat_id)
     df.to_excel(path, index=False, engine="openpyxl")
     return path
 

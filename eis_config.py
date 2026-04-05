@@ -62,17 +62,69 @@ def get_eis_max_pages() -> int:
     return max(1, min(n, 50))
 
 
-def build_eis_results_url(page_number: int) -> str:
-    districts = get_eis_districts_query_value().replace(",", "%2C")
-    search_enc = quote_plus(get_eis_search_query())
-    pf = get_eis_price_from()
-    pt = get_eis_price_to()
-    rpp = get_eis_records_per_page_token()
+def build_eis_url(
+    *,
+    search_query: str,
+    page_number: int = 1,
+    records_per_page: str = "_50",
+    sort_by: str = "UPDATE_DATE",
+    sort_direction: str = "false",
+    laws: list[str] | None = None,
+    price_from: int = 5_000_000,
+    price_to: int = 30_000_000,
+    districts: str = "",
+    date_from: str | None = None,
+    date_to: str | None = None,
+    customer_title: str = "",
+    placing_ways: list[str] | None = None,
+    order_stages: list[str] | None = None,
+) -> str:
+    """Единый URL-билдер для расширенного поиска ЕИС."""
     page_number = max(1, page_number)
-    return (
-        "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?"
-        f"searchString={search_enc}&morphology=on&search-filter=Дате+размещения"
-        f"&pageNumber={page_number}&sortDirection=false&recordsPerPage={rpp}&showLotsInfoHidden=false"
-        "&sortBy=UPDATE_DATE&fz44=on&fz223=on&af=on&currencyIdGeneral=-1"
-        f"&priceFromGeneral={pf}&priceToGeneral={pt}&districts={districts}"
+    search_enc = quote_plus(search_query)
+
+    parts = [
+        "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?",
+        f"searchString={search_enc}",
+        "&morphology=on",
+        "&search-filter=Дате+размещения",
+        f"&pageNumber={page_number}",
+        f"&sortDirection={sort_direction}",
+        f"&recordsPerPage={records_per_page}",
+        "&showLotsInfoHidden=false",
+        f"&sortBy={sort_by}",
+    ]
+
+    for law in (laws or ["fz44", "fz223", "af"]):
+        parts.append(f"&{law}=on")
+
+    parts.append("&currencyIdGeneral=-1")
+    parts.append(f"&priceFromGeneral={price_from}")
+    parts.append(f"&priceToGeneral={price_to}")
+
+    if districts:
+        parts.append(f"&districts={districts.replace(',', '%2C')}")
+    if date_from:
+        parts.append(f"&publishDateFrom={date_from}")
+    if date_to:
+        parts.append(f"&publishDateTo={date_to}")
+    if customer_title:
+        parts.append(f"&customerTitle={quote_plus(customer_title)}")
+    if placing_ways:
+        parts.append(f"&placingWayList={'%2C'.join(placing_ways)}")
+    if order_stages:
+        parts.append(f"&orderStages={'%2C'.join(order_stages)}")
+
+    return "".join(parts)
+
+
+def build_eis_results_url(page_number: int) -> str:
+    """CLI-обёртка: собирает параметры из env и вызывает build_eis_url."""
+    return build_eis_url(
+        search_query=get_eis_search_query(),
+        page_number=page_number,
+        records_per_page=get_eis_records_per_page_token(),
+        price_from=get_eis_price_from(),
+        price_to=get_eis_price_to(),
+        districts=get_eis_districts_query_value(),
     )

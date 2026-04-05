@@ -1,23 +1,16 @@
+import logging
 import os
 from pathlib import Path
 
 import load_env  # noqa: F401
 import pandas as pd
-import requests
 
-from reader import extract_text_from_docx, extract_text_from_pdf
+from llm import call_ollama, OllamaError
+from reader import extract_text_from_file
 from tenders_manifest import load_tenders_manifest
-from tz_docs import is_tz_docx, is_tz_pdf
+from tz_docs import is_tz_file
 
-OLLAMA_URL = os.environ.get(
-    "OLLAMA_URL", "http://localhost:11434/api/generate"
-).strip()
-MODEL_NAME = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b").strip()
-
-try:
-    OLLAMA_TIMEOUT_SEC = int(os.environ.get("OLLAMA_TIMEOUT_SEC", "600"))
-except ValueError:
-    OLLAMA_TIMEOUT_SEC = 600
+log = logging.getLogger("tender_bot.analyzer")
 
 EXCEL_COLUMNS = [
     "ID Тендера",
@@ -58,14 +51,10 @@ def _analysis_min_text_chars() -> int:
 
 
 def _load_tz_plaintext(file_path: str, filename: str) -> str:
-    low = filename.lower()
     try:
-        if low.endswith(".docx"):
-            return extract_text_from_docx(file_path)
-        if low.endswith(".pdf"):
-            return extract_text_from_pdf(file_path)
+        return extract_text_from_file(file_path)
     except Exception as e:
-        print(f"⚠️ Ошибка чтения {filename}: {e}")
+        log.warning("Ошибка чтения %s: %s", filename, e)
     return ""
 
 
@@ -88,62 +77,23 @@ def _save_excel_with_optional_merge(df_new: pd.DataFrame) -> None:
                 subset=["ID Тендера", "Имя файла ТЗ"],
                 keep="last",
             )
-            print(
-                f"📎 EXCEL_MERGE_EXISTING: объединено с предыдущим файлом "
-                f"({len(merged)} строк)."
-            )
+            log.info("EXCEL_MERGE_EXISTING: объединено (%d строк).", len(merged))
             merged.to_excel(path, index=False)
             return
         except Exception as e:
-            print(f"⚠️ Не удалось прочитать/слить старый Excel ({e}), перезаписываем.")
+            log.warning("Не удалось слить старый Excel (%s), перезаписываем.", e)
     df_new = _normalize_excel_df(df_new.copy())
     df_new.to_excel(path, index=False)
 
 
-def analyze_tender_with_llm(text, tender_id):
-    safe_text = text[:25000] 
-    print(f"🧠 Нейросеть читает тендер {tender_id} (Текст: {len(safe_text)} симв.)...")
-    
-    prompt = f"""
-Ты — профессиональный тендерный аналитик. Прочитай выдержку из Технического задания (ТЗ) и составь выжимку без воды.
-
-Структура ответа:
-1. Предмет контракта: (Что нужно сделать)
-2. Сроки: (Даты)
-3. Требования и штрафы: (Важные условия)
-
-Текст ТЗ:
-{safe_text}
-"""
-
-    payload = {
-        "model": MODEL_NAME,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.1,
-            "num_ctx": 16384 
-        }
-    }
-
-    try:
-        response = requests.post(
-            OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT_SEC
-        )
-        if response.status_code == 200:
-            return response.json().get("response", "")
-        return f"❌ Ошибка API: {response.status_code}"
-    except Exception as e:
-        return f"❌ Ошибка Ollama: {e}"
-
 def run_analytics(base_dir="downloads", manifest_path: str | Path | None = None):
-    print("=== 🤖 СТАРТ AI-АНАЛИТИКИ (С ЭКСПОРТОМ В EXCEL) ===\n")
+    log.info("=== СТАРТ AI-АНАЛИТИКИ (С ЭКСПОРТОМ В EXCEL) ===")
 
     manifest: dict[str, dict[str, str]] = {}
     if manifest_path is not None:
         manifest = load_tenders_manifest(manifest_path)
         if manifest:
-            print(f"📎 Подмешиваем метаданные из манифеста ({len(manifest)} id).\n")
+            log.info("Подмешиваем метаданные из манифеста (%d id).", len(manifest))
 
     results_data = []
     min_chars = _analysis_min_text_chars()
@@ -154,38 +104,37 @@ def run_analytics(base_dir="downloads", manifest_path: str | Path | None = None)
             continue
 
         for file in sorted(os.listdir(tender_path)):
-            if not (is_tz_docx(file) or is_tz_pdf(file)):
+            if not is_tz_file(file):
                 continue
             file_path = os.path.join(tender_path, file)
             text = _load_tz_plaintext(file_path, file)
 
             if len(text) <= min_chars:
                 if text.strip():
-                    print(
-                        f"   ⚠️ {file}: извлечено мало текста ({len(text)} симв., "
-                        f"порог ANALYSIS_MIN_TEXT_CHARS={min_chars}) — пропуск LLM."
+                    log.info(
+                        "%s: мало текста (%d симв., порог %d) — пропуск LLM.",
+                        file, len(text), min_chars,
                     )
                 continue
 
-            print(f"\n" + "="*60)
-            print(f"📄 Документ: {file}")
+            log.info("Документ: %s", file)
 
             report_path = os.path.join(tender_path, "AI_Анализ.txt")
             if _skip_existing_ai_analysis() and os.path.isfile(report_path):
                 with open(report_path, encoding="utf-8") as f:
                     analysis = f.read()
-                print(
-                    "⏭️ SKIP_EXISTING_AI_ANALYSIS: используем сохранённый "
-                    f"{report_path} ({len(analysis)} симв.)"
-                )
+                log.info("SKIP_EXISTING_AI_ANALYSIS: %s (%d симв.)", report_path, len(analysis))
             else:
-                analysis = analyze_tender_with_llm(text, tender_id)
+                log.info("LLM анализирует тендер %s (%d симв.)...", tender_id, len(text))
+                try:
+                    analysis = call_ollama(text, tender_id)
+                except OllamaError as e:
+                    log.warning("LLM-ошибка для %s: %s", tender_id, e)
+                    continue
                 with open(report_path, "w", encoding="utf-8") as f:
                     f.write(analysis)
 
-            print("\n📋 РЕЗЮМЕ:")
-            print(analysis)
-            print("="*60 + "\n")
+            log.info("Резюме:\n%s", analysis)
 
             meta = manifest.get(tender_id, {})
             results_data.append(
@@ -200,12 +149,12 @@ def run_analytics(base_dir="downloads", manifest_path: str | Path | None = None)
             )
 
     if results_data:
-        print("📊 Формируем Excel-базу данных...")
+        log.info("Формируем Excel-базу данных...")
         df = pd.DataFrame(results_data)
         _save_excel_with_optional_merge(df)
-        print(f"✅ Готово! Таблица: {EXCEL_FILENAME}")
+        log.info("Готово! Таблица: %s", EXCEL_FILENAME)
     else:
-        print("⚠️ Нечего сохранять в таблицу. Тендеры не проанализированы.")
+        log.warning("Нечего сохранять в таблицу. Тендеры не проанализированы.")
 
 if __name__ == "__main__":
     run_analytics()

@@ -1,9 +1,11 @@
 import os
+import subprocess
+import tempfile
 
 from docx import Document
 from pypdf import PdfReader
 
-from tz_docs import is_tz_docx, is_tz_pdf
+from tz_docs import is_tz_docx, is_tz_pdf, is_tz_file
 
 
 def _pdf_ocr_enabled() -> bool:
@@ -108,6 +110,64 @@ def extract_text_from_pdf(file_path: str) -> str:
     return text
 
 
+def extract_text_from_doc(file_path: str) -> str:
+    """Читает старый .doc (бинарный Word). Пробует python-docx, затем LibreOffice."""
+    try:
+        return extract_text_from_docx(file_path)
+    except Exception:
+        pass
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = subprocess.run(
+                ["soffice", "--headless", "--convert-to", "docx", "--outdir", tmpdir, file_path],
+                capture_output=True, timeout=60,
+            )
+            if result.returncode == 0:
+                converted = [f for f in os.listdir(tmpdir) if f.endswith(".docx")]
+                if converted:
+                    return extract_text_from_docx(os.path.join(tmpdir, converted[0]))
+    except FileNotFoundError:
+        print(
+            f"⚠️ Для .doc нужен LibreOffice (soffice в PATH): {os.path.basename(file_path)}"
+        )
+    except subprocess.TimeoutExpired:
+        print(f"⚠️ Конвертация .doc → .docx: таймаут ({os.path.basename(file_path)})")
+    except Exception as e:
+        print(f"⚠️ Конвертация .doc → .docx: {e}")
+    return ""
+
+
+def extract_text_from_rtf(file_path: str) -> str:
+    """Читает .rtf через striprtf."""
+    try:
+        from striprtf.striprtf import rtf_to_text
+    except ImportError:
+        print("⚠️ Для чтения .rtf установите: pip install striprtf")
+        return ""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            rtf_content = f.read()
+        return rtf_to_text(rtf_content)
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения RTF: {e}")
+        return ""
+
+
+def extract_text_from_file(file_path: str) -> str:
+    """Единый диспетчер: извлекает текст из .docx / .doc / .pdf / .rtf."""
+    low = file_path.lower()
+    if low.endswith(".docx"):
+        return extract_text_from_docx(file_path)
+    if low.endswith(".doc"):
+        return extract_text_from_doc(file_path)
+    if low.endswith(".pdf"):
+        return extract_text_from_pdf(file_path)
+    if low.endswith(".rtf"):
+        return extract_text_from_rtf(file_path)
+    return ""
+
+
 def get_tz_text(base_dir="downloads"):
     print("🔍 Начинаем глубокий поиск и чтение ТЗ...\n")
     
@@ -121,16 +181,13 @@ def get_tz_text(base_dir="downloads"):
         tz_found = False
         
         for file in os.listdir(tender_path):
-            if not (is_tz_docx(file) or is_tz_pdf(file)):
+            if not is_tz_file(file):
                 continue
             file_path = os.path.join(tender_path, file)
             print(f"   📄 Читаем файл: {file}")
 
             try:
-                if is_tz_docx(file):
-                    full_text = extract_text_from_docx(file_path)
-                else:
-                    full_text = extract_text_from_pdf(file_path)
+                full_text = extract_text_from_file(file_path)
 
                 print(f"   ✅ Текст вытащен! Длина: {len(full_text)} символов.")
                 print(f"   📝 Превью:\n   {full_text[:300]}...\n")
@@ -141,8 +198,8 @@ def get_tz_text(base_dir="downloads"):
 
         if not tz_found:
             print(
-                "   ⚠️ Нет подходящего .docx/.pdf по имени (маркеры в tz_docs), "
-                "или старый .doc / скан без текста\n"
+                "   ⚠️ Нет подходящего файла ТЗ по имени "
+                "(поддерживаются .docx, .doc, .pdf, .rtf)\n"
             )
 
 if __name__ == "__main__":

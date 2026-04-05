@@ -18,6 +18,8 @@ __pycache__/
 
 # downloads & local output
 downloads/
+reports/
+bot_settings/
 Tenders_Analytics_DB.xlsx
 tenders_manifest.json
 

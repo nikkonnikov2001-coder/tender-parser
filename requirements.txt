@@ -3,19 +3,19 @@ aiogram>=3.7.0
 apscheduler>=3.10.0
 
 # ── Парсинг ──
-playwright
+curl_cffi
+pydantic
 beautifulsoup4
 lxml
-pydantic
-curl_cffi
+playwright
 
 # ── Чтение документов ──
 python-docx
 pypdf
+striprtf
 pymupdf
 pytesseract
 Pillow
-striprtf
 
 # ── AI-анализ + Excel ──
 requests

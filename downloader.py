@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 from collections.abc import AsyncIterator
@@ -10,6 +11,12 @@ from playwright.async_api import Page, async_playwright
 
 from browser_ctx import PLAYWRIGHT_CONTEXT_KWARGS, playwright_headless
 from playwright_retry import goto_with_retry
+
+log = logging.getLogger("tender_bot.downloader")
+
+_VERIFY_TLS = os.environ.get(
+    "DOWNLOAD_VERIFY_TLS", "1"
+).strip().lower() not in ("0", "false", "no", "off")
 
 
 def _documents_page_url(tender_url: str) -> str:
@@ -62,13 +69,15 @@ async def shared_download_browser() -> AsyncIterator[Page]:
             await browser.close()
 
 
-async def get_tender_docs(page: Page, url: str, tender_id: str) -> None:
+async def get_tender_docs(
+    page: Page, url: str, tender_id: str, base_dir: str = "downloads",
+) -> None:
     doc_url = _documents_page_url(url)
-    print(f"🚀 Летим в раздел документов: {doc_url}")
+    log.info("Раздел документов: %s", doc_url)
 
-    save_dir = os.path.join("downloads", tender_id)
+    save_dir = os.path.join(base_dir, tender_id)
     os.makedirs(save_dir, exist_ok=True)
-    print(f"📁 Файлы будут сохранены в папку: {save_dir}\n")
+    log.info("Сохранение в: %s", save_dir)
 
     try:
         await goto_with_retry(
@@ -78,7 +87,7 @@ async def get_tender_docs(page: Page, url: str, tender_id: str) -> None:
         await page.wait_for_timeout(1500)
         await page.keyboard.press("Escape")
 
-        print("⏳ Ждем подгрузки таблицы файлов...")
+        log.debug("Ожидание подгрузки таблицы файлов...")
         await page.wait_for_timeout(3000)
 
         links = await page.locator(
@@ -112,13 +121,13 @@ async def get_tender_docs(page: Page, url: str, tender_id: str) -> None:
             ).strip()
 
             full_url = href if href.startswith("http") else f"https://zakupki.gov.ru{href}"
-            print(f"⬇️ Качаем: {safe_title}")
+            log.info("Скачивание: %s", safe_title)
 
             try:
                 response = curl_requests.get(
                     full_url,
                     impersonate="chrome120",
-                    verify=False,
+                    verify=_VERIFY_TLS,
                     timeout=60,
                 )
 
@@ -136,17 +145,17 @@ async def get_tender_docs(page: Page, url: str, tender_id: str) -> None:
                     with open(file_path, "wb") as f:
                         f.write(response.content)
 
-                    print(f"✅ Сохранено: {file_path}\n")
+                    log.info("Сохранено: %s", file_path)
                     downloaded_count += 1
                 else:
-                    print(f"❌ Ошибка ЕИС при отдаче файла: {response.status_code}\n")
+                    log.warning("Ошибка ЕИС при отдаче файла: %s", response.status_code)
             except Exception as dl_e:
-                print(f"❌ Сбой сети при скачивании: {dl_e}\n")
+                log.warning("Сбой сети при скачивании: %s", dl_e)
 
-        print(f"🎯 Итого успешно скачано файлов: {downloaded_count}")
+        log.info("Итого скачано файлов: %d", downloaded_count)
 
     except Exception as e:
-        print(f"❌ Ошибка парсинга: {e}")
+        log.error("Ошибка при скачивании документов: %s", e)
 
 
 async def _get_tender_docs_one_off(url: str, tender_id: str) -> None:
